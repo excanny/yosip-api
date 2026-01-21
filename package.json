@@ -1,0 +1,52 @@
+{
+  "name": "yosip-api",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Ecommerce system REST API built with Express and MySQL",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "express",
+    "api",
+    "booking",
+    "mysql",
+    "rest"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@elasticemail/elasticemail-client": "^4.0.26",
+    "@elasticemail/elasticemail-client-ts-axios": "^4.0.22",
+    "@getbrevo/brevo": "^3.0.1",
+    "@paypal/checkout-server-sdk": "^1.0.3",
+    "@sendgrid/mail": "^8.1.6",
+    "axios": "^1.13.2",
+    "bcrypt": "^5.1.1",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1",
+    "dotenv": "^17.2.3",
+    "express": "^4.18.2",
+    "google-auth-library": "^10.4.2",
+    "googleapis": "^164.1.0",
+    "mongoose": "^8.19.1",
+    "multer": "^2.0.2",
+    "mysql2": "^3.6.0",
+    "node-mailjet": "^6.0.9",
+    "nodemailer": "^7.0.10",
+    "resend": "^6.2.2",
+    "stripe": "^20.0.0",
+    "twilio": "^5.10.3",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
