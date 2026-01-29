@@ -24,8 +24,7 @@ const { core: PayPalCore, orders: PayPalOrders } = pkg;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-dotenv.config();
-
+dotenv.config(); //
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -785,54 +784,6 @@ app.get('/products/:id', async (req, res) => {
   }
 });
 
-// app.post('/products', upload.array('images', 5), async (req, res) => {
-//   try {
-//     const productData = req.body;
-    
-//     // Generate SKU if not provided
-//     if (!productData.sku) {
-//       productData.sku = `SKU${Date.now()}`;
-//     }
-    
-//     // Add uploaded image paths
-//     if (req.files && req.files.length > 0) {
-//       productData.images = req.files.map(file => `/uploads/products/${file.filename}`);
-//     }
-    
-//     const product = new Product(productData);
-//     await product.save();
-    
-//     res.json({
-//       success: true,
-//       message: 'Product created successfully',
-//       product
-//     });
-//   } catch (error) {
-//     // Clean up uploaded files if product creation fails
-//     if (req.files) {
-//       req.files.forEach(file => {
-//         fs.unlink(file.path, err => {
-//           if (err) console.error('Error deleting file:', err);
-//         });
-//       });
-//     }
-    
-//     console.error('Error creating product:', error);
-    
-//     if (error.code === 11000) {
-//       return res.status(400).json({ 
-//         success: false, 
-//         message: 'Product with this SKU already exists' 
-//       });
-//     }
-    
-//     res.status(500).json({ 
-//       success: false, 
-//       message: error.message || 'Server error occurred' 
-//     });
-//   }
-// });
-
 app.post('/products', upload.array('images', 5), async (req, res) => {
   try {
     console.log('📁 Request body:', req.body);
@@ -959,6 +910,98 @@ app.put('/products/:id', upload.array('images', 5), async (req, res) => {
       });
     }
     
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Server error occurred' 
+    });
+  }
+});
+
+// PATCH endpoint to update product active status only
+app.patch('/products/:id/status', async (req, res) => {
+  try {
+    const { isActive } = req.body;
+    
+    // Validate the isActive field
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'isActive must be a boolean value' 
+      });
+    }
+
+    // Find and update the product
+    const product = await Product.findByIdAndUpdate(
+      req.params.id,
+      { isActive },
+      { new: true, runValidators: true }
+    );
+    
+    if (!product) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Product not found' 
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: `Product ${isActive ? 'activated' : 'deactivated'} successfully`,
+      product: {
+        _id: product._id,
+        name: product.name,
+        isActive: product.isActive
+      }
+    });
+  } catch (error) {
+    console.error('Error updating product status:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Server error occurred' 
+    });
+  }
+});
+
+// Alternative: More flexible PATCH endpoint that can update any single field
+app.patch('/products/:id', async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
+    
+    if (!product) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Product not found' 
+      });
+    }
+
+    // Only allow specific fields to be updated via PATCH
+    const allowedUpdates = ['isActive', 'stock', 'price'];
+    const updates = Object.keys(req.body);
+    
+    // Check if all updates are allowed
+    const isValidOperation = updates.every(update => allowedUpdates.includes(update));
+    
+    if (!isValidOperation) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid updates. Only isActive, stock, and price can be updated via PATCH' 
+      });
+    }
+    
+    // Apply updates
+    updates.forEach(update => {
+      product[update] = req.body[update];
+    });
+    
+    await product.save();
+    
+    res.json({
+      success: true,
+      message: 'Product updated successfully',
+      product
+    });
+  } catch (error) {
+    console.error('Error updating product:', error);
     res.status(500).json({ 
       success: false, 
       message: error.message || 'Server error occurred' 
