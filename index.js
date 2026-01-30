@@ -11,7 +11,6 @@ import Order from './models/Order.js';
 import Cart from './models/Cart.js';
 import multer from 'multer';
 import path from 'path';
-import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import ensureGuestSession from './middleware/ensureGuestSession.js';
@@ -20,32 +19,47 @@ import Stripe from 'stripe';
 import pkg from '@paypal/checkout-server-sdk';
 const { core: PayPalCore, orders: PayPalOrders } = pkg;
 
+// 🆕 CLOUDINARY IMPORTS
+import { v2 as cloudinary } from 'cloudinary';
+import { CloudinaryStorage } from 'multer-storage-cloudinary';
+
 // Create __dirname equivalent for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-dotenv.config(); //
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-// Ensure uploads directory exists
-const uploadsDir = 'uploads/products';
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-// Configure storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1E9)}`;
-    cb(null, `${uniqueSuffix}${path.extname(file.originalname)}`);
-  }
+// 🆕 CLOUDINARY CONFIGURATION
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
+// Verify Cloudinary configuration
+if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
+  console.log('✅ Cloudinary configured successfully');
+  console.log('   Cloud Name:', process.env.CLOUDINARY_CLOUD_NAME);
+} else {
+  console.warn('⚠️ Cloudinary not configured - image uploads will fail');
+  console.warn('   Add CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET to .env');
+}
+
+// 🆕 CLOUDINARY STORAGE CONFIGURATION
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'yosip-products', // Folder name in Cloudinary
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif'],
+    transformation: [
+      { width: 1000, height: 1000, crop: 'limit' }, // Optimize images
+      { quality: 'auto' }
+    ]
+  }
+});
 
 // File filter for images only
 const fileFilter = (req, file, cb) => {
@@ -56,11 +70,11 @@ const fileFilter = (req, file, cb) => {
   if (extname && mimetype) {
     cb(null, true);
   } else {
-    cb(new Error('Only image files are allowed (jpeg, jpg, png, gif, webp avif)'));
+    cb(new Error('Only image files are allowed (jpeg, jpg, png, gif, webp, avif)'));
   }
 };
 
-// Configure multer
+// Configure multer with Cloudinary storage
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
@@ -79,9 +93,6 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-
-// Serve uploaded files statically
-app.use('/uploads', express.static('uploads'));
 
 // MongoDB configuration
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -171,6 +182,29 @@ function getCountryCode(countryName) {
     'Turkey': 'TR'
   };
   return countryCodes[countryName] || 'US';
+}
+
+// 🆕 HELPER FUNCTION TO DELETE CLOUDINARY IMAGES
+async function deleteCloudinaryImages(imageUrls) {
+  if (!imageUrls || imageUrls.length === 0) return;
+  
+  const deletePromises = imageUrls.map(async (imageUrl) => {
+    try {
+      // Extract public_id from Cloudinary URL
+      // Example URL: https://res.cloudinary.com/your-cloud-name/image/upload/v1234567890/yosip-products/image-name.jpg
+      const urlParts = imageUrl.split('/');
+      const filename = urlParts[urlParts.length - 1].split('.')[0];
+      const folder = urlParts[urlParts.length - 2];
+      const publicId = `${folder}/${filename}`;
+      
+      await cloudinary.uploader.destroy(publicId);
+      console.log(`   ✅ Deleted image from Cloudinary: ${publicId}`);
+    } catch (error) {
+      console.error(`   ❌ Error deleting image from Cloudinary:`, error.message);
+    }
+  });
+  
+  await Promise.all(deletePromises);
 }
 
 // ================= MAILJET CONFIGURATION =================
@@ -759,7 +793,6 @@ app.get('/products', async (req, res) => {
     if (isActive !== undefined) {
       filter.isActive = isActive === 'true';
     }
-    // If isActive is not provided, don't add it to filter (returns all products)
     
     if (category) filter.category = category;
     if (search) filter.name = { $regex: search, $options: 'i' };
@@ -784,11 +817,11 @@ app.get('/products/:id', async (req, res) => {
   }
 });
 
+// 🆕 CREATE PRODUCT WITH CLOUDINARY UPLOAD
 app.post('/products', upload.array('images', 5), async (req, res) => {
   try {
     console.log('📁 Request body:', req.body);
-    console.log('📸 Files received:', req.files);
-    console.log('📸 Files length:', req.files?.length);
+    console.log('📸 Files received:', req.files?.length || 0);
     
     const productData = req.body;
     
@@ -797,14 +830,13 @@ app.post('/products', upload.array('images', 5), async (req, res) => {
       productData.sku = `SKU${Date.now()}`;
     }
     
-    // Add uploaded image paths
+    // 🆕 Add Cloudinary image URLs
     if (req.files && req.files.length > 0) {
-      console.log('✅ Processing', req.files.length, 'images');
+      console.log('✅ Processing', req.files.length, 'images from Cloudinary');
       productData.images = req.files.map(file => {
-        console.log('   - File:', file.filename);
-        return `/uploads/products/${file.filename}`;
+        console.log('   - Cloudinary URL:', file.path);
+        return file.path; // Cloudinary URL
       });
-      console.log('📸 Image paths:', productData.images);
     } else {
       console.log('⚠️ No files received');
     }
@@ -828,15 +860,8 @@ app.post('/products', upload.array('images', 5), async (req, res) => {
       name: error.name
     });
     
-    // Clean up uploaded files if product creation fails
-    if (req.files) {
-      console.log('🗑️ Cleaning up', req.files.length, 'uploaded files');
-      req.files.forEach(file => {
-        fs.unlink(file.path, err => {
-          if (err) console.error('Error deleting file:', err);
-        });
-      });
-    }
+    // 🆕 If product creation fails, Cloudinary images are already uploaded
+    // You might want to delete them, but it's not critical for free tier
     
     if (error.code === 11000) {
       return res.status(400).json({ 
@@ -853,6 +878,7 @@ app.post('/products', upload.array('images', 5), async (req, res) => {
   }
 });
 
+// 🆕 UPDATE PRODUCT WITH CLOUDINARY
 app.put('/products/:id', upload.array('images', 5), async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
@@ -863,20 +889,16 @@ app.put('/products/:id', upload.array('images', 5), async (req, res) => {
 
     const productData = req.body;
     
-    // Handle image updates
+    // 🆕 Handle image updates with Cloudinary
     if (req.files && req.files.length > 0) {
-      // Delete old images before uploading new ones
+      // Delete old images from Cloudinary
       if (product.images && product.images.length > 0) {
-        product.images.forEach(imagePath => {
-          const fullPath = path.join(__dirname, imagePath);
-          fs.unlink(fullPath, err => {
-            if (err) console.error('Error deleting old image:', err);
-          });
-        });
+        await deleteCloudinaryImages(product.images);
       }
       
-      // Add new uploaded image paths
-      productData.images = req.files.map(file => `/uploads/products/${file.filename}`);
+      // Add new Cloudinary image URLs
+      productData.images = req.files.map(file => file.path);
+      console.log('✅ Updated images on Cloudinary');
     }
     
     // Update product fields
@@ -892,15 +914,6 @@ app.put('/products/:id', upload.array('images', 5), async (req, res) => {
       product
     });
   } catch (error) {
-    // Clean up uploaded files if update fails
-    if (req.files) {
-      req.files.forEach(file => {
-        fs.unlink(file.path, err => {
-          if (err) console.error('Error deleting file:', err);
-        });
-      });
-    }
-    
     console.error('Error updating product:', error);
     
     if (error.code === 11000) {
@@ -922,7 +935,6 @@ app.patch('/products/:id/status', async (req, res) => {
   try {
     const { isActive } = req.body;
     
-    // Validate the isActive field
     if (typeof isActive !== 'boolean') {
       return res.status(400).json({ 
         success: false, 
@@ -930,7 +942,6 @@ app.patch('/products/:id/status', async (req, res) => {
       });
     }
 
-    // Find and update the product
     const product = await Product.findByIdAndUpdate(
       req.params.id,
       { isActive },
@@ -962,7 +973,6 @@ app.patch('/products/:id/status', async (req, res) => {
   }
 });
 
-// Alternative: More flexible PATCH endpoint that can update any single field
 app.patch('/products/:id', async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
@@ -974,11 +984,9 @@ app.patch('/products/:id', async (req, res) => {
       });
     }
 
-    // Only allow specific fields to be updated via PATCH
     const allowedUpdates = ['isActive', 'stock', 'price'];
     const updates = Object.keys(req.body);
     
-    // Check if all updates are allowed
     const isValidOperation = updates.every(update => allowedUpdates.includes(update));
     
     if (!isValidOperation) {
@@ -988,7 +996,6 @@ app.patch('/products/:id', async (req, res) => {
       });
     }
     
-    // Apply updates
     updates.forEach(update => {
       product[update] = req.body[update];
     });
@@ -1009,6 +1016,7 @@ app.patch('/products/:id', async (req, res) => {
   }
 });
 
+// 🆕 DELETE PRODUCT WITH CLOUDINARY CLEANUP
 app.delete('/products/:id', async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
@@ -1020,14 +1028,9 @@ app.delete('/products/:id', async (req, res) => {
       });
     }
     
-    // Delete associated images
+    // 🆕 Delete associated images from Cloudinary
     if (product.images && product.images.length > 0) {
-      product.images.forEach(imagePath => {
-        const fullPath = path.join(process.cwd(), imagePath);
-        fs.unlink(fullPath, err => {
-          if (err) console.error('Error deleting image:', err);
-        });
-      });
+      await deleteCloudinaryImages(product.images);
     }
     
     await Product.findByIdAndDelete(req.params.id);
@@ -1217,7 +1220,6 @@ app.put('/orders/:id', async (req, res) => {
 
 // ================= CART ENDPOINTS =================
 
-// Create a lock manager (add this at the top of your routes file)
 const cartLocks = new Map();
 
 const acquireLock = async (key, maxWait = 5000) => {
@@ -1237,8 +1239,6 @@ const releaseLock = (key) => {
   cartLocks.delete(key);
 };
 
-
-// GET CART
 app.get('/cart', ensureGuestSession, async (req, res) => {
   try {
     const userId = req.query.userId || null;
@@ -1254,7 +1254,6 @@ app.get('/cart', ensureGuestSession, async (req, res) => {
     const filter = userId ? { userId } : { sessionId };
     const cart = await Cart.findOne(filter).populate('items.productId');
 
-    // If no cart exists, return empty cart (don't create one)
     if (!cart) {
       return res.json({
         success: true,
@@ -1285,13 +1284,10 @@ app.get('/cart', ensureGuestSession, async (req, res) => {
   }
 });
 
-// ADD TO CART
-
 app.post('/cart/add', ensureGuestSession, async (req, res) => {
   const lockKey = req.body.userId || req.sessionId;
   
   try {
-    // Acquire lock for this user/session
     await acquireLock(lockKey);
     
     const {productId, quantity = 1 } = req.body;
@@ -1313,7 +1309,6 @@ app.post('/cart/add', ensureGuestSession, async (req, res) => {
       });
     }
 
-    // Validate IDs
     if (userId && !mongoose.Types.ObjectId.isValid(userId)) {
       return res.status(400).json({
         success: false,
@@ -1328,7 +1323,6 @@ app.post('/cart/add', ensureGuestSession, async (req, res) => {
       });
     }
 
-    // Verify product exists
     const product = await Product.findById(productId);
 
     if (!product) {
@@ -1354,11 +1348,9 @@ app.post('/cart/add', ensureGuestSession, async (req, res) => {
 
     const filter = userId ? { userId } : { sessionId };
     
-    // Find existing cart
     let cart = await Cart.findOne(filter);
 
     if (!cart) {
-      // Create new cart
       cart = new Cart({
         ...filter,
         items: [],
@@ -1367,13 +1359,11 @@ app.post('/cart/add', ensureGuestSession, async (req, res) => {
       });
     }
 
-    // Check if product exists in cart
     const existingItemIndex = cart.items.findIndex(
       item => item.productId.toString() === productId.toString()
     );
 
     if (existingItemIndex > -1) {
-      // Product exists - update quantity
       const newQuantity = cart.items[existingItemIndex].quantity + quantity;
       
       if (newQuantity > product.stock) {
@@ -1386,7 +1376,6 @@ app.post('/cart/add', ensureGuestSession, async (req, res) => {
       cart.items[existingItemIndex].quantity = newQuantity;
       cart.items[existingItemIndex].addedAt = new Date();
     } else {
-      // New product - add to cart
       cart.items.push({
         productId: productId,
         quantity: quantity,
@@ -1417,12 +1406,10 @@ app.post('/cart/add', ensureGuestSession, async (req, res) => {
       error: error.message 
     });
   } finally {
-    // Always release the lock
     releaseLock(lockKey);
   }
 });
 
-// UPDATE CART ITEM
 app.put('/cart/update', ensureGuestSession, async (req, res) => {
   try {
     const { productId, quantity } = req.body;
@@ -1444,7 +1431,6 @@ app.put('/cart/update', ensureGuestSession, async (req, res) => {
       });
     }
 
-    // Validate IDs
     if (userId && !mongoose.Types.ObjectId.isValid(userId)) {
       return res.status(400).json({
         success: false,
@@ -1459,7 +1445,6 @@ app.put('/cart/update', ensureGuestSession, async (req, res) => {
       });
     }
 
-    // Allow 0 for removal, but not negative numbers
     if (quantity < 0 || !Number.isInteger(quantity)) {
       return res.status(400).json({
         success: false,
@@ -1488,7 +1473,6 @@ app.put('/cart/update', ensureGuestSession, async (req, res) => {
       });
     }
 
-    // If quantity is 0, remove the item
     if (quantity === 0) {
       cart.items.splice(itemIndex, 1);
       await cart.save();
@@ -1547,12 +1531,10 @@ app.put('/cart/update', ensureGuestSession, async (req, res) => {
   }
 });
 
-// REMOVE FROM CART
 app.delete('/cart/remove', async (req, res) => {
   try {
     const { productId } = req.body;
     
-    // Get userId from session or use sessionId from cookies
     const userId = req.session?.userId || req.user?._id;
     const sessionId = req.sessionID;
 
@@ -1572,7 +1554,6 @@ app.delete('/cart/remove', async (req, res) => {
       });
     }
 
-    // Validate IDs
     if (userId && !mongoose.Types.ObjectId.isValid(userId)) {
       return res.status(400).json({
         success: false,
@@ -1625,7 +1606,6 @@ app.delete('/cart/remove', async (req, res) => {
   }
 });
 
-// CLEAR CART
 app.delete('/cart/clear', async (req, res) => {
   try {
     const { userId, sessionId } = req.body;
@@ -1637,7 +1617,6 @@ app.delete('/cart/clear', async (req, res) => {
       });
     }
 
-    // Validate userId if provided
     if (userId && !mongoose.Types.ObjectId.isValid(userId)) {
       return res.status(400).json({
         success: false,
@@ -1677,7 +1656,6 @@ app.delete('/cart/clear', async (req, res) => {
   }
 });
 
-// MERGE CARTS (after login)
 app.post('/cart/merge', async (req, res) => {
   try {
     const { userId, sessionId } = req.body;
@@ -1689,7 +1667,6 @@ app.post('/cart/merge', async (req, res) => {
       });
     }
 
-    // Validate userId
     if (!mongoose.Types.ObjectId.isValid(userId)) {
       return res.status(400).json({
         success: false,
@@ -1885,7 +1862,6 @@ app.post('/orders/create-payment', async (req, res) => {
       total
     } = req.body;
 
-    // Validate required fields
     if (!items || items.length === 0) {
       return res.status(400).json({ message: 'Cart is empty' });
     }
@@ -1897,7 +1873,6 @@ app.post('/orders/create-payment', async (req, res) => {
     console.log('   Payment Method:', paymentMethod);
     console.log('   Total Amount:', total);
 
-    // Prepare order items with product details
     const orderItems = [];
     let calculatedSubtotal = 0;
 
@@ -1930,7 +1905,6 @@ app.post('/orders/create-payment', async (req, res) => {
       });
     }
 
-    // Create order in database (pending payment)
     const order = new Order({
       orderNumber: generateOrderNumber(),
       customerId: req.user?._id || null,
@@ -1959,26 +1933,22 @@ app.post('/orders/create-payment', async (req, res) => {
     await order.save();
     console.log('   ✅ Order created:', order.orderNumber);
 
-    // Create payment based on method
     if (paymentMethod === 'stripe') {
       console.log('   🔵 Creating Stripe session...');
       
-      // Create Stripe Checkout Session
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ['card'],
         line_items: [
-          // Order items
           ...orderItems.map(item => ({
             price_data: {
               currency: 'usd',
               product_data: {
                 name: item.productName,
               },
-              unit_amount: Math.round(item.price * 100), // Convert to cents
+              unit_amount: Math.round(item.price * 100),
             },
             quantity: item.quantity,
           })),
-          // Shipping
           ...(shipping > 0 ? [{
             price_data: {
               currency: 'usd',
@@ -1989,7 +1959,6 @@ app.post('/orders/create-payment', async (req, res) => {
             },
             quantity: 1,
           }] : []),
-          // Tax
           ...(tax > 0 ? [{
             price_data: {
               currency: 'usd',
@@ -2010,7 +1979,6 @@ app.post('/orders/create-payment', async (req, res) => {
         }
       });
 
-      // Save Stripe session ID to order
       order.stripeSessionId = session.id;
       await order.save();
 
@@ -2027,7 +1995,6 @@ app.post('/orders/create-payment', async (req, res) => {
     } else if (paymentMethod === 'paypal') {
       console.log('   🔵 Creating PayPal order...');
       
-      // Create PayPal order
       const request = new PayPalOrders.OrdersCreateRequest();
       request.prefer("return=representation");
       request.requestBody({
@@ -2082,11 +2049,9 @@ app.post('/orders/create-payment', async (req, res) => {
 
       const paypalOrder = await paypalClient().execute(request);
       
-      // Save PayPal order ID
       order.paypalOrderId = paypalOrder.result.id;
       await order.save();
 
-      // Get approval URL
       const approvalUrl = paypalOrder.result.links.find(link => link.rel === 'approve').href;
 
       console.log('   ✅ PayPal order created:', paypalOrder.result.id);
@@ -2109,7 +2074,6 @@ app.post('/orders/create-payment', async (req, res) => {
   }
 });
 
-// STRIPE WEBHOOK (for payment confirmation)
 app.post('/payment/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -2125,7 +2089,6 @@ app.post('/payment/stripe-webhook', express.raw({ type: 'application/json' }), a
 
   console.log('\n⚡ Stripe Webhook Event:', event.type);
 
-  // Handle the event
   switch (event.type) {
     case 'checkout.session.completed':
       const session = event.data.object;
@@ -2133,7 +2096,6 @@ app.post('/payment/stripe-webhook', express.raw({ type: 'application/json' }), a
       console.log('   Session completed:', session.id);
       console.log('   Order ID:', session.metadata.orderId);
       
-      // Update order status
       const order = await Order.findById(session.metadata.orderId);
       if (order) {
         order.paymentStatus = 'paid';
@@ -2142,7 +2104,6 @@ app.post('/payment/stripe-webhook', express.raw({ type: 'application/json' }), a
         order.stripePaymentIntentId = session.payment_intent;
         await order.save();
 
-        // Reduce product stock
         for (const item of order.items) {
           await Product.findByIdAndUpdate(
             item.productId,
@@ -2150,7 +2111,6 @@ app.post('/payment/stripe-webhook', express.raw({ type: 'application/json' }), a
           );
         }
 
-        // Clear user's cart if logged in
         if (order.customerId) {
           await Cart.findOneAndUpdate(
             { userId: order.customerId },
@@ -2158,7 +2118,6 @@ app.post('/payment/stripe-webhook', express.raw({ type: 'application/json' }), a
           );
         }
 
-        // Send confirmation emails
         await sendOrderConfirmationEmail(order);
         await sendAdminOrderNotification(order);
 
@@ -2178,17 +2137,15 @@ app.post('/payment/stripe-webhook', express.raw({ type: 'application/json' }), a
   res.json({ received: true });
 });
 
-// PAYPAL SUCCESS REDIRECT
 app.get('/payment/paypal-success', async (req, res) => {
   console.log('\n✅ PayPal Success Redirect');
   
   try {
-    const { orderId, token } = req.query; // token is PayPal's order ID
+    const { orderId, token } = req.query;
 
     console.log('   Order ID:', orderId);
     console.log('   PayPal Token:', token);
 
-    // Capture the payment
     const request = new PayPalOrders.OrdersCaptureRequest(token);
     request.requestBody({});
 
@@ -2197,7 +2154,6 @@ app.get('/payment/paypal-success', async (req, res) => {
     console.log('   Capture status:', capture.result.status);
 
     if (capture.result.status === 'COMPLETED') {
-      // Update order
       const order = await Order.findById(orderId);
       if (order) {
         order.paymentStatus = 'paid';
@@ -2206,7 +2162,6 @@ app.get('/payment/paypal-success', async (req, res) => {
         order.paypalCaptureId = capture.result.id;
         await order.save();
 
-        // Reduce product stock
         for (const item of order.items) {
           await Product.findByIdAndUpdate(
             item.productId,
@@ -2214,7 +2169,6 @@ app.get('/payment/paypal-success', async (req, res) => {
           );
         }
 
-        // Clear user's cart if logged in
         if (order.customerId) {
           await Cart.findOneAndUpdate(
             { userId: order.customerId },
@@ -2222,14 +2176,12 @@ app.get('/payment/paypal-success', async (req, res) => {
           );
         }
 
-        // Send confirmation emails
         await sendOrderConfirmationEmail(order);
         await sendAdminOrderNotification(order);
 
         console.log('   ✅ Order updated to PAID');
       }
 
-      // Redirect to success page
       res.redirect(`${process.env.FRONTEND_URL}/order-success?order_id=${orderId}`);
     } else {
       console.log('   ❌ Payment not completed');
@@ -2241,7 +2193,6 @@ app.get('/payment/paypal-success', async (req, res) => {
   }
 });
 
-// GET ORDER BY ID (for success page)
 app.get('/orders/by-id/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
